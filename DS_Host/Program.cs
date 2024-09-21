@@ -53,153 +53,162 @@ static class Program
                 switch (commandType)
                 {
                     case "REGISTER":
-                        string clientAddress = message[3].ConvertToString();
-
-                        Console.WriteLine(
-                            "Received: CommandType = {0} | ClientAddress = {1}",
-                            commandType, clientAddress
-                        );
-
-                        // check if queue can accommodate new connects
-                        if (queue_connected_clients.Count < MAX_NUM_WORKER_NODES && !String.IsNullOrEmpty(clientAddress))
+                        Task.Run(() =>
                         {
-                            int clientRank;
-                            // check if client already registered. If not, add to queue else exit
-                            if (!queue_connected_clients.Contains(clientAddress))
+                            string clientAddress = message[3].ConvertToString();
+
+                            Console.WriteLine(
+                                "Received: CommandType = {0} | ClientAddress = {1}",
+                                commandType, clientAddress
+                            );
+
+                            // check if queue can accommodate new connects
+                            if (queue_connected_clients.Count < MAX_NUM_WORKER_NODES && !String.IsNullOrEmpty(clientAddress))
                             {
-                                queue_connected_clients.Add(clientAddress);
-                                clientRank = queue_connected_clients.IndexOf(clientAddress);
+                                int clientRank;
+                                // check if client already registered. If not, add to queue else exit
+                                if (!queue_connected_clients.Contains(clientAddress))
+                                {
+                                    queue_connected_clients.Add(clientAddress);
+                                    clientRank = queue_connected_clients.IndexOf(clientAddress);
+                                }
+                                else
+                                {
+                                    clientRank = queue_connected_clients.IndexOf(clientAddress);
+                                }
+
+                                // respond with client's rank
+                                responder.SendMoreFrame(clientIdentity.ToByteArray())
+                                        .SendMoreFrameEmpty()
+                                        .SendMoreFrame("OK")
+                                        .SendFrame(clientRank.ToString());
                             }
                             else
                             {
-                                clientRank = queue_connected_clients.IndexOf(clientAddress);
+                                string response = String.IsNullOrEmpty(clientAddress) ? "Worker TCP Address not provided" : "Server has reached maximum capacity";
+                                responder.SendMoreFrame(clientIdentity.ToByteArray())
+                                        .SendMoreFrameEmpty()
+                                        .SendMoreFrame("ERR")
+                                        .SendFrame(response);
                             }
-
-                            // respond with client's rank
-                            responder.SendMoreFrame(clientIdentity.ToByteArray())
-                                    .SendMoreFrameEmpty()
-                                    .SendMoreFrame("OK")
-                                    .SendFrame(clientRank.ToString());
-                        }
-                        else
-                        {
-                            string response = String.IsNullOrEmpty(clientAddress) ? "Worker TCP Address not provided" : "Server has reached maximum capacity";
-                            responder.SendMoreFrame(clientIdentity.ToByteArray())
-                                    .SendMoreFrameEmpty()
-                                    .SendMoreFrame("ERR")
-                                    .SendFrame(response);
-                        }
+                        });
                         break;
                     case "COMMAND":
-                        string workerAddress = message[3].ConvertToString();
-                        string commandToExecute = message[4].ConvertToString();
-
-                        Console.WriteLine(
-                            "Received: CommandType = {0} | WorkerAddress = {1} | CMD = {2}",
-                            commandType, workerAddress, commandToExecute
-                        );
-                        // get rank of worker node
-                        int workerRank = queue_connected_clients.IndexOf(workerAddress);
-                        // register worker if rank has value of -1 i.e. workerAddress not found in queue
-                        if (workerRank < 0 && queue_connected_clients.Count < MAX_NUM_WORKER_NODES && !String.IsNullOrEmpty(workerAddress))
+                        Task.Run(() =>
                         {
-                            queue_connected_clients.Add(workerAddress);
-                            workerRank = queue_connected_clients.IndexOf(workerAddress);
-                        }
+                            string workerAddress = message[3].ConvertToString();
+                            string commandToExecute = message[4].ConvertToString();
 
-                        // get eligible processing nodes
-                        // eligible if has rank of a higher numeric value and is not currently working.
-                        var eligibleWorkers = queue_connected_clients.Where((clientAddress,  clientRank) => clientRank > workerRank);
-                        var availableWorkers = eligibleWorkers.Except(queue_busy_clients);
+                            Console.WriteLine(
+                                "Received: CommandType = {0} | WorkerAddress = {1} | CMD = {2}",
+                                commandType, workerAddress, commandToExecute
+                            );
+                            // get rank of worker node
+                            int workerRank = queue_connected_clients.IndexOf(workerAddress);
+                            // register worker if rank has value of -1 i.e. workerAddress not found in queue
+                            if (workerRank < 0 && queue_connected_clients.Count < MAX_NUM_WORKER_NODES && !String.IsNullOrEmpty(workerAddress))
+                            {
+                                queue_connected_clients.Add(workerAddress);
+                                workerRank = queue_connected_clients.IndexOf(workerAddress);
+                            }
+
+                            // get eligible processing nodes
+                            // eligible if has rank of a higher numeric value and is not currently working.
+                            var eligibleWorkers = queue_connected_clients.Where((clientAddress,  clientRank) => clientRank > workerRank);
+                            var availableWorkers = eligibleWorkers.Except(queue_busy_clients);
                         
-                        // inform requesting node that their request cannot be handled if no workers found
-                        if (!availableWorkers.Any())
-                        {
-                            responder.SendMoreFrame(clientIdentity.ToByteArray())
+                            // inform requesting node that their request cannot be handled if no workers found
+                            if (!availableWorkers.Any())
+                            {
+                                responder.SendMoreFrame(clientIdentity.ToByteArray())
+                                        .SendMoreFrameEmpty()
+                                        .SendMoreFrame(DS_ResultType.ERR.ToString())
+                                        .SendFrame("There are no available nodes to handle your request");
+                                return;
+                            }
+                            string selectedWorker = availableWorkers.First().ToString();
+                        
+                            Console.WriteLine("Connecting to worker . .");
+                            using (var requester = new RequestSocket())
+                            {
+                                requester.Connect(String.Format("tcp://{0}", selectedWorker));
+
+                                requester.SendMoreFrame(DS_CommandType.COMMAND.ToString())
+                                        .SendFrame(commandToExecute);
+                            
+                                queue_busy_clients.Add(selectedWorker);
+
+                                NetMQMessage workerResponse = requester.ReceiveMultipartMessage();
+                                string resultType = workerResponse[0].ConvertToString();
+                                string resultData = workerResponse[1].ConvertToString();
+                            
+                                queue_busy_clients.Remove(selectedWorker);
+                                Console.WriteLine("Worker responded | {0} : {1} ...", resultType, resultData);
+
+                                responder.SendMoreFrame(clientIdentity.ToByteArray())
                                     .SendMoreFrameEmpty()
-                                    .SendMoreFrame(DS_ResultType.ERR.ToString())
-                                    .SendFrame("There are no available nodes to handle your request");
-                            break;
-                        }
-                        string selectedWorker = availableWorkers.First().ToString();
-                        
-                        Console.WriteLine("Connecting to worker . .");
-                        using (var requester = new RequestSocket())
-                        {
-                            requester.Connect(String.Format("tcp://{0}", selectedWorker));
-
-                            requester.SendMoreFrame(DS_CommandType.COMMAND.ToString())
-                                    .SendFrame(commandToExecute);
-                            
-                            queue_busy_clients.Add(selectedWorker);
-
-                            NetMQMessage workerResponse = requester.ReceiveMultipartMessage();
-                            string resultType = workerResponse[0].ConvertToString();
-                            string resultData = workerResponse[1].ConvertToString();
-                            
-                            queue_busy_clients.Remove(selectedWorker);
-                            Console.WriteLine("Worker responded | {0} : {1} ...", resultType, resultData);
-
-                            responder.SendMoreFrame(clientIdentity.ToByteArray())
-                                .SendMoreFrameEmpty()
-                                .SendMoreFrame(resultType)
-                                .SendFrame(resultData);
-                        }
+                                    .SendMoreFrame(resultType)
+                                    .SendFrame(resultData);
+                            }
+                        });
                         break;
                     case "HEARTBEAT":
-                        string trackedWorkerAddress = message[3].ConvertToString();
+                        Task.Run(() => 
+                        { 
+                            string trackedWorkerAddress = message[3].ConvertToString();
 
-                        Console.WriteLine(
-                            "Received: CommandType = {0} | ClientAddress = {1}",
-                            commandType, trackedWorkerAddress
-                        );
-                        // check if heartbeat sender is in connected queue.
-                        bool isCurrentlyTracked = queue_connected_clients.Contains(trackedWorkerAddress);
-                        if (!isCurrentlyTracked)
-                        {
-                            // ensure that they don't exist in busy queue
-                            if (queue_busy_clients.Contains(trackedWorkerAddress))
+                            Console.WriteLine(
+                                "Received: CommandType = {0} | ClientAddress = {1}",
+                                commandType, trackedWorkerAddress
+                            );
+                            // check if heartbeat sender is in connected queue.
+                            bool isCurrentlyTracked = queue_connected_clients.Contains(trackedWorkerAddress);
+                            if (!isCurrentlyTracked)
                             {
-                                queue_busy_clients.Remove(trackedWorkerAddress);
-                            }
+                                // ensure that they don't exist in busy queue
+                                if (queue_busy_clients.Contains(trackedWorkerAddress))
+                                {
+                                    queue_busy_clients.Remove(trackedWorkerAddress);
+                                }
 
-                            // add to connected queue
-                            queue_connected_clients.Add(trackedWorkerAddress);
+                                // add to connected queue
+                                queue_connected_clients.Add(trackedWorkerAddress);
 
-                            // upsert to heartbeat queue
-                            if(queue_client_heartbeats.ContainsKey(trackedWorkerAddress))
-                            {
-                                queue_client_heartbeats[trackedWorkerAddress] = DateTime.UtcNow.ToBinary();
-                            }
-                            else
-                            {
-                                queue_client_heartbeats.Add(trackedWorkerAddress, DateTime.UtcNow.ToBinary());
-                            }
+                                // upsert to heartbeat queue
+                                if(queue_client_heartbeats.ContainsKey(trackedWorkerAddress))
+                                {
+                                    queue_client_heartbeats[trackedWorkerAddress] = DateTime.UtcNow.ToBinary();
+                                }
+                                else
+                                {
+                                    queue_client_heartbeats.Add(trackedWorkerAddress, DateTime.UtcNow.ToBinary());
+                                }
 
-                            // respond to client
-                            responder.SendMoreFrame(clientIdentity.ToByteArray())
-                                    .SendMoreFrameEmpty()
-                                    .SendMoreFrame("OK")
-                                    .SendFrame("HEARTBEAT Clocked");
-                        }
-                        else
-                        {
-                            // worker is in connected queue. so update the heartbeat
-                            if (queue_client_heartbeats.ContainsKey(trackedWorkerAddress))
-                            {
-                                queue_client_heartbeats[trackedWorkerAddress] = DateTime.UtcNow.ToBinary();
+                                // respond to client
+                                responder.SendMoreFrame(clientIdentity.ToByteArray())
+                                        .SendMoreFrameEmpty()
+                                        .SendMoreFrame("OK")
+                                        .SendFrame("HEARTBEAT Clocked");
                             }
                             else
                             {
-                                queue_client_heartbeats.Add(trackedWorkerAddress, DateTime.UtcNow.ToBinary());
-                            }
+                                // worker is in connected queue. so update the heartbeat
+                                if (queue_client_heartbeats.ContainsKey(trackedWorkerAddress))
+                                {
+                                    queue_client_heartbeats[trackedWorkerAddress] = DateTime.UtcNow.ToBinary();
+                                }
+                                else
+                                {
+                                    queue_client_heartbeats.Add(trackedWorkerAddress, DateTime.UtcNow.ToBinary());
+                                }
 
-                            // respond to client
-                            responder.SendMoreFrame(clientIdentity.ToByteArray())
-                                    .SendMoreFrameEmpty()
-                                    .SendMoreFrame("OK")
-                                    .SendFrame("HEARTBEAT Clocked");
-                        }
+                                // respond to client
+                                responder.SendMoreFrame(clientIdentity.ToByteArray())
+                                        .SendMoreFrameEmpty()
+                                        .SendMoreFrame("OK")
+                                        .SendFrame("HEARTBEAT Clocked");
+                            }
+                        });
                         break;
                 }
 
