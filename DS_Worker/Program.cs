@@ -17,41 +17,38 @@ static class Program
         const string WORKER_ADDRESS = "localhost:5556";
         const int HEARTBEAT_SEND_DELAY_MINUTES = 1;
 
+        // register with master node so that master can know worker is online.
+        // we do not proceed at all if master fails to acknowledge us
+        using (var requester = new RequestSocket())
+        {
+            Console.WriteLine("Registering with master. . .");
+            requester.Connect(String.Format("tcp://{0}", MASTER_ADDRESS));
+
+            requester.TrySendFrame(DS_CommandType.REGISTER.ToString(), true);
+            requester.TrySendFrame(WORKER_ADDRESS);
+
+            NetMQMessage masterResponse = requester.ReceiveMultipartMessage();
+
+            string resultType = masterResponse[0].ConvertToString();
+            string resultData = masterResponse[1].ConvertToString();
+
+            switch (resultType)
+            {
+                case "OK":
+                    Console.WriteLine("TCP Client Worker up and running with rank: {0}", resultData);
+                    break;
+                case "ERR":
+                    Console.WriteLine("TCP Client Worker Registration failed: {0}", resultData);
+                    throw new Exception(resultData); // exit because master failed to register us
+            }
+        }
+
         // Function 1. listen for commands to execute on secondary thread
         Task executeCommandFromServer = Task.Run(static () =>
         {
             using (var worker = new ResponseSocket())
             {
                 worker.Bind(String.Format("tcp://{0}", WORKER_ADDRESS));
-
-                // register with master node so that master can know worker is online
-                using (var requester = new RequestSocket())
-                {
-                    Console.WriteLine("Registering with master. . .");
-                    requester.Connect(String.Format("tcp://{0}", MASTER_ADDRESS));
-
-                    requester.TrySendFrame(DS_CommandType.REGISTER.ToString(), true);
-                    requester.TrySendFrame(WORKER_ADDRESS);
-
-                    NetMQMessage masterResponse = requester.ReceiveMultipartMessage();
-                    Console.WriteLine(masterResponse.ToString());
-
-                    string resultType = masterResponse[0].ConvertToString();  
-                    string resultData = masterResponse[1].ConvertToString();
-
-                    switch (resultType)
-                    {
-                        case "OK":
-                            Console.WriteLine("TCP Client Worker up and running with rank: {0}", resultData);
-                            break;
-                        case "ERR":
-                            Console.WriteLine("TCP Client Worker failed to start: {0}", resultData);
-                            throw new Exception(resultData); // exit because master failed to register us
-                        default:
-                            Console.WriteLine("Master did not respond quickly enough. Assuming network delay. .");
-                            break;
-                    }
-                }
                 
                 while (true) // main loop to listen for instructions from master
                 {

@@ -85,11 +85,33 @@ static class Program
                             }
                             else
                             {
-                                string response = String.IsNullOrEmpty(clientAddress) ? "Worker TCP Address not provided" : "Server has reached maximum capacity";
+                                
+                                if (String.IsNullOrEmpty(clientAddress))
+                                {
+                                    responder.SendMoreFrame(clientIdentity.ToByteArray())
+                                        .SendMoreFrameEmpty()
+                                        .SendMoreFrame("ERR")
+                                        .SendFrame("Worker TCP Address not provided");
+                                }
+                                // check if node attempting to register was already in queue
+                                if(queue_connected_clients.Contains(clientAddress))
+                                {
+                                    // if here, it means client had disconnected within heartbeat duration.
+                                    // we're playing fair, so they'll have to start afresh
+                                    queue_client_heartbeats.Remove(clientAddress);
+                                    queue_busy_clients.Remove(clientAddress);
+                                    queue_connected_clients.Remove(clientAddress);
+
+                                    responder.SendMoreFrame(clientIdentity.ToByteArray())
+                                        .SendMoreFrameEmpty()
+                                        .SendMoreFrame("ERR")
+                                        .SendFrame("Connection rejected. Please try again");
+                                }
+                                // Worker limit reached. Cannot admit new ones.
                                 responder.SendMoreFrame(clientIdentity.ToByteArray())
                                         .SendMoreFrameEmpty()
                                         .SendMoreFrame("ERR")
-                                        .SendFrame(response);
+                                        .SendFrame("Server has reached maximum capacity");
                             }
                         });
                         break;
